@@ -9,12 +9,17 @@ import {IAggregatorV3} from "./Interfaces/IAggregatorV3.sol";
 import {Math} from "openzeppelin-contracts/contracts/utils/math/Math.sol";
 import {Errors} from "./Errors.sol";
 import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IOracle} from "./Oracle.sol";
+import {Calc} from "./Calc.sol";
+import {SignedMath} from "openzeppelin-contracts/contracts/utils/math/SignedMath.sol";
 
 import "forge-std/Test.sol";
 
 
 contract MinimumPerps is ERC4626 {
+    using SignedMath for int256;
     using SafeCast for int256;
+    using SafeCast for uint256;
     using SafeERC20 for IERC20;
 
     struct Position {
@@ -25,13 +30,8 @@ contract MinimumPerps is ERC4626 {
 
     uint256 public constant PRECISION = 1e30;
 
-    IAggregatorV3 immutable public indexPriceFeed;
-    uint256 public indexFeedHeartbeatDuration;
-    uint256 public indexFeedFactor;
-
-    IAggregatorV3 immutable public collateralPriceFeed;
-    uint256 public collateralFeedHeartbeatDuration;
-    uint256 public collateralFeedFactor;
+    IOracle public oracle;
+    address public indexToken;
 
     uint256 public totalCollateral;
     uint256 public totalDeposits;
@@ -47,23 +47,21 @@ contract MinimumPerps is ERC4626 {
     // The maximum aggregate OI that can be open as a percentage of the deposits
     uint256 public maxUtilizationRatio = 5e29; // 50%
 
+    // Max leverage is 20x
+    uint256 public maxLeverage = 20e30;
+
+    uint256 public liquidationFeeBp = 200; // 2%
+    uint256 public constant BASIS_POINTS = 10_000;
+
     constructor(
         string memory _name, 
         string memory _symbol, 
+        address _indexToken,
         IERC20 _collateralToken, 
-        IAggregatorV3 _indexPriceFeed, 
-        uint256 _indexFeedHeartbeatDuration,
-        uint256 _indexFeedFactor,
-        IAggregatorV3 _collateralPriceFeed, 
-        uint256 _collateralFeedHeartbeatDuration,
-        uint256 _collateralFeedFactor
+        IOracle _oracle
     ) ERC20(_name, _symbol) ERC4626(_collateralToken) {
-        indexPriceFeed = _indexPriceFeed;
-        indexFeedHeartbeatDuration = _indexFeedHeartbeatDuration;
-        indexFeedFactor = _indexFeedFactor;
-        collateralPriceFeed = _collateralPriceFeed;
-        collateralFeedHeartbeatDuration = _collateralFeedHeartbeatDuration;
-        collateralFeedFactor = _collateralFeedFactor;
+        indexToken = _indexToken;
+        oracle = _oracle;
     }
 
     function getPosition(bool isLong, address user) external returns (Position memory) {
@@ -97,17 +95,17 @@ contract MinimumPerps is ERC4626 {
         int256 traderPnlLong = getNetPnl(true, indexPrice);
         int256 traderPnlShort = getNetPnl(false, indexPrice);
 
-        int256 netTraderPnl = traderPnlLong + traderPnlShort;
+        int256 netTraderPnlInCollateral = (traderPnlLong + traderPnlShort) / getCollateralPrice().toInt256();
 
-        if (netTraderPnl > 0) {
-            if (netTraderPnl.toUint256() > _totalDeposits) revert Errors.TraderPnlExceedsDeposits();
-            return _totalDeposits - netTraderPnl.toUint256();
-        } else return _totalDeposits + (-netTraderPnl).toUint256();
+        if (netTraderPnlInCollateral > 0) {
+            if (netTraderPnlInCollateral.toUint256() > _totalDeposits) revert Errors.TraderPnlExceedsDeposits();
+            return _totalDeposits - netTraderPnlInCollateral.toUint256();
+        } else return _totalDeposits + (-netTraderPnlInCollateral).toUint256();
     }
 
 
     function increasePosition(bool isLong, uint256 sizeDeltaUsd, uint256 collateralDelta) external {
-        IERC20(asset()).safeTransferFrom(msg.sender, address(this), collateralDelta);
+        if (collateralDelta > 0) IERC20(asset()).safeTransferFrom(msg.sender, address(this), collateralDelta);
 
         mapping(address => Position) storage positions = isLong ? longPositions : shortPositions;
 
@@ -136,8 +134,109 @@ contract MinimumPerps is ERC4626 {
         _validateMaxUtilization();
     }
 
-    function decreasePosition() external {
-        // TODO
+    function decreasePosition(bool isLong, uint256 sizeDeltaUsd, uint256 collateralDelta) external {
+        _decreasePosition(msg.sender, isLong, sizeDeltaUsd, collateralDelta, false);
+        if (isPositionLiquidatable(msg.sender, isLong)) revert Errors.PositionIsLiquidatable();
+    }
+
+    function isPositionLiquidatable(address trader, bool isLong) public returns (bool) {
+        Position memory position = isLong ? longPositions[trader] : shortPositions[trader];
+        if (position.sizeInUsd == 0) return false;
+        uint256 collateralValue = position.collateralAmount * getCollateralPrice();
+
+        (int256 positionPnl, ) = _calculateRealizedPnl(position, isLong, position.sizeInUsd);
+        if (positionPnl <= 0) {
+            uint256 positionLoss = positionPnl.abs();
+            if (collateralValue <= positionLoss) return true;
+            collateralValue -= positionLoss;
+        } else {
+            collateralValue += positionPnl.abs();
+        }
+
+        return position.sizeInUsd * 1e30 / collateralValue > maxLeverage;
+    }
+
+    function liquidate(address trader, bool isLong) external {
+        if (!isPositionLiquidatable(trader, isLong)) revert Errors.PositionNotLiquidatable();
+        mapping(address => Position) storage positions = isLong ? longPositions : shortPositions;
+
+        Position memory position = positions[trader];
+
+        _decreasePosition(trader, isLong, position.sizeInUsd, 0, true);
+    }
+
+    function _decreasePosition(address trader, bool isLong, uint256 sizeDeltaUsd, uint256 collateralDelta, bool isLiquidation) internal {
+        mapping(address => Position) storage positions = isLong ? longPositions : shortPositions;
+
+        Position memory position = positions[trader];
+
+        uint256 collateralTokenPrice = getCollateralPrice();
+
+        (int256 realizedPnl, uint256 sizeDeltaTokens) = _calculateRealizedPnl(position, isLong, sizeDeltaUsd);
+
+        // decrease the size & collateral
+        position.sizeInTokens -= sizeDeltaTokens;
+        position.sizeInUsd -= sizeDeltaUsd;
+        position.collateralAmount -= collateralDelta;
+
+        if (isLong) {
+            openInterestLong -= sizeDeltaUsd;
+            openInterestTokensLong -= sizeDeltaTokens;
+        } else {
+            openInterestShort -= sizeDeltaUsd;
+            openInterestTokensShort -= sizeDeltaTokens;
+        }
+
+        // Choice is to take the liquidationFee at a higher priority than the LP payout during liquidation
+        if (isLiquidation) {
+            uint256 liquidationFeeAmount = position.collateralAmount * liquidationFeeBp / BASIS_POINTS;
+            position.collateralAmount -= liquidationFeeAmount;
+            IERC20(asset()).safeTransfer(msg.sender, liquidationFeeAmount);
+        }
+
+        if (realizedPnl < 0) {
+            uint256 positionLossInCollateral = realizedPnl.abs() / collateralTokenPrice;
+            if (isLiquidation && position.collateralAmount < positionLossInCollateral) { // Allow insolvent liquidations
+                positionLossInCollateral = position.collateralAmount;
+                position.collateralAmount = 0; 
+            }
+            else if (position.collateralAmount < positionLossInCollateral) revert Errors.InsufficientCollateral(positionLossInCollateral, position.collateralAmount);
+            position.collateralAmount -= positionLossInCollateral;
+            totalDeposits += positionLossInCollateral; // LPs paid losses
+        }
+
+        uint256 outputAmount;
+
+        if (realizedPnl > 0) {
+            outputAmount += realizedPnl.toUint256() / collateralTokenPrice;
+
+            // LPs pay out the trader
+            totalDeposits -= outputAmount;
+        }
+
+        if (collateralDelta > 0) outputAmount += collateralDelta;
+        if (position.sizeInTokens == 0 || position.sizeInUsd == 0) {
+            outputAmount += position.collateralAmount;
+            delete positions[trader];
+        } else {
+            positions[trader] = position;
+        }
+
+        if (outputAmount > 0) IERC20(asset()).safeTransfer(trader, outputAmount);
+    }
+
+    function _calculateRealizedPnl(Position memory position, bool isLong, uint256 sizeDeltaUsd) internal returns (int256 realizedPnl, uint256 sizeDeltaTokens) {
+        int256 currentPositionValue = (position.sizeInTokens * getIndexPrice()).toInt256();
+        int256 totalPnl = isLong ? currentPositionValue - position.sizeInUsd.toInt256() : position.sizeInUsd.toInt256() - currentPositionValue;
+
+        realizedPnl = totalPnl * sizeDeltaUsd.toInt256() / position.sizeInUsd.toInt256();
+        if (position.sizeInUsd == sizeDeltaUsd) {
+            sizeDeltaTokens = position.sizeInTokens;
+        } else if (isLong) {
+            sizeDeltaTokens = Calc.roundUpDivision(position.sizeInTokens * sizeDeltaUsd, position.sizeInUsd);
+        } else {
+            sizeDeltaTokens = position.sizeInTokens * sizeDeltaUsd / position.sizeInUsd;
+        }
     }
 
     function _deposit(address caller, address receiver, uint256 assets, uint256 shares) internal override {
@@ -152,30 +251,11 @@ contract MinimumPerps is ERC4626 {
     }
 
     function getIndexPrice() public view returns (uint256) {
-        return _getPriceFeedPrice(indexPriceFeed, indexFeedHeartbeatDuration, indexFeedFactor);
+        return oracle.getTokenPrice(indexToken);
     }
 
     function getCollateralPrice() public view returns (uint256) {
-        return _getPriceFeedPrice(collateralPriceFeed, collateralFeedHeartbeatDuration, collateralFeedFactor);
-    }
-
-    function _getPriceFeedPrice(IAggregatorV3 priceFeed, uint256 heartBeatDuration, uint256 feedFactor) internal view returns (uint256) {
-        (
-            /* uint80 roundID */,
-            int256 price,
-            /* uint256 startedAt */,
-            uint256 timestamp,
-            /* uint80 answeredInRound */
-        ) = priceFeed.latestRoundData();
-
-        if (price <= 0) revert Errors.InvalidFeedPrice(address(priceFeed), price);
-        if (block.timestamp - timestamp > heartBeatDuration) {
-            revert Errors.PriceFeedNotUpdated(address(indexPriceFeed), timestamp, heartBeatDuration);
-        }
-
-        uint256 adjustedPrice = price.toUint256() * feedFactor;
-
-        return adjustedPrice;
+        return oracle.getTokenPrice(asset());
     }
 
     function _validateNonEmptyPosition(Position memory position) internal {
