@@ -161,11 +161,17 @@ contract MinimumPerps is ERC4626, Ownable2Step {
         if (isPositionLiquidatable(msg.sender, isLong)) revert Errors.PositionIsLiquidatable();
     }
 
-    function isPositionLiquidatable(address trader, bool isLong) public returns (bool) {
+    function isPositionLiquidatable(address trader, bool isLong) public view returns (bool) {
         Position memory position = isLong ? longPositions[trader] : shortPositions[trader];
         if (position.sizeInUsd == 0) return false;
         uint256 collateralValue = position.collateralAmount * getCollateralPrice();
 
+        // Account for borrowing fees
+        uint256 borrowingFees = _calculateBorrowingFees(position);
+        if (collateralValue <= borrowingFees) return true;
+        else collateralValue -= borrowingFees;
+
+        // Account for PnL
         (int256 positionPnl, ) = _calculateRealizedPnl(position, isLong, position.sizeInUsd);
         if (positionPnl <= 0) {
             uint256 positionLoss = positionPnl.abs();
@@ -260,7 +266,7 @@ contract MinimumPerps is ERC4626, Ownable2Step {
         if (outputAmount > 0) IERC20(asset()).safeTransfer(trader, outputAmount);
     }
 
-    function _calculateRealizedPnl(Position memory position, bool isLong, uint256 sizeDeltaUsd) internal returns (int256 realizedPnl, uint256 sizeDeltaTokens) {
+    function _calculateRealizedPnl(Position memory position, bool isLong, uint256 sizeDeltaUsd) internal view returns (int256 realizedPnl, uint256 sizeDeltaTokens) {
         int256 currentPositionValue = (position.sizeInTokens * getIndexPrice()).toInt256();
         int256 totalPnl = isLong ? currentPositionValue - position.sizeInUsd.toInt256() : position.sizeInUsd.toInt256() - currentPositionValue;
 
