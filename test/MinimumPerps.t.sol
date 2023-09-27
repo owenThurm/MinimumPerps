@@ -83,7 +83,8 @@ contract MinimumPerpsTest is Test {
             symbol, 
             address(BTC),
             IERC20(USDC),
-            IOracle(oracleContract)
+            IOracle(oracleContract),
+            0 // Borrowing fees deactivated by default
         );
     }
 

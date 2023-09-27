@@ -12,11 +12,11 @@ import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/Safe
 import {IOracle} from "./Oracle.sol";
 import {Calc} from "./Calc.sol";
 import {SignedMath} from "openzeppelin-contracts/contracts/utils/math/SignedMath.sol";
+import {Ownable2Step} from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
 
 import "forge-std/Test.sol";
 
-
-contract MinimumPerps is ERC4626 {
+contract MinimumPerps is ERC4626, Ownable2Step {
     using SignedMath for int256;
     using SafeCast for int256;
     using SafeCast for uint256;
@@ -26,6 +26,7 @@ contract MinimumPerps is ERC4626 {
         uint256 sizeInUsd;
         uint256 sizeInTokens;
         uint256 collateralAmount;
+        uint256 lastUpdatedAt;
     }
 
     uint256 public constant PRECISION = 1e30;
@@ -53,15 +54,29 @@ contract MinimumPerps is ERC4626 {
     uint256 public liquidationFeeBp = 200; // 2%
     uint256 public constant BASIS_POINTS = 10_000;
 
+    uint256 public borrowingPerSharePerSecond;
+    uint256 public constant MAX_BORROWING_RATE = 3170979198376458650431; // 10% per year
+
     constructor(
         string memory _name, 
         string memory _symbol, 
         address _indexToken,
         IERC20 _collateralToken, 
-        IOracle _oracle
+        IOracle _oracle,
+        uint256 _borrowingPerSharePerSecond
     ) ERC20(_name, _symbol) ERC4626(_collateralToken) {
         indexToken = _indexToken;
         oracle = _oracle;
+        _setBorrowingPerSharePerSecond(_borrowingPerSharePerSecond);
+    }
+
+    function setBorrowingPerSharePerSecond(uint256 _borrowingPerSharePerSecond) external onlyOwner {
+        _setBorrowingPerSharePerSecond(_borrowingPerSharePerSecond);
+    }
+
+    function _setBorrowingPerSharePerSecond(uint256 _borrowingPerSharePerSecond) internal {
+        if (_borrowingPerSharePerSecond > MAX_BORROWING_RATE) revert Errors.InvalidBorrowingFeeRate(_borrowingPerSharePerSecond);
+        borrowingPerSharePerSecond = _borrowingPerSharePerSecond;
     }
 
     function getPosition(bool isLong, address user) external returns (Position memory) {
@@ -114,9 +129,13 @@ contract MinimumPerps is ERC4626 {
         uint256 indexTokenPrice = getIndexPrice();
         uint256 indexTokenDelta = isLong ? sizeDeltaUsd / indexTokenPrice : Math.ceilDiv(sizeDeltaUsd, indexTokenPrice);
 
+        uint256 pendingBorrowingFees = _calculateBorrowingFees(position);
+
         position.collateralAmount += collateralDelta;
         position.sizeInUsd += sizeDeltaUsd;
         position.sizeInTokens += indexTokenDelta;
+        position.collateralAmount -= pendingBorrowingFees;
+        position.lastUpdatedAt = block.timestamp;
 
         _validateNonEmptyPosition(position);
 
@@ -174,10 +193,22 @@ contract MinimumPerps is ERC4626 {
 
         (int256 realizedPnl, uint256 sizeDeltaTokens) = _calculateRealizedPnl(position, isLong, sizeDeltaUsd);
 
+        uint256 pendingBorrowingFees = _calculateBorrowingFees(position);
+
         // decrease the size & collateral
         position.sizeInTokens -= sizeDeltaTokens;
         position.sizeInUsd -= sizeDeltaUsd;
         position.collateralAmount -= collateralDelta;
+
+        if (pendingBorrowingFees > position.collateralAmount && isLiquidation) { // Allow liquidations to insolvently close
+            pendingBorrowingFees = position.collateralAmount;
+            position.collateralAmount = 0;
+            totalDeposits += pendingBorrowingFees;
+        } else {
+            if (position.collateralAmount < pendingBorrowingFees) revert Errors.InsufficientCollateralForBorrowingFees(pendingBorrowingFees, position.collateralAmount);
+            position.collateralAmount -= pendingBorrowingFees;
+            totalDeposits += pendingBorrowingFees;
+        }
 
         if (isLong) {
             openInterestLong -= sizeDeltaUsd;
@@ -200,7 +231,7 @@ contract MinimumPerps is ERC4626 {
                 positionLossInCollateral = position.collateralAmount;
                 position.collateralAmount = 0; 
             }
-            else if (position.collateralAmount < positionLossInCollateral) revert Errors.InsufficientCollateral(positionLossInCollateral, position.collateralAmount);
+            else if (position.collateralAmount < positionLossInCollateral) revert Errors.InsufficientCollateralForLoss(positionLossInCollateral, position.collateralAmount);
             position.collateralAmount -= positionLossInCollateral;
             totalDeposits += positionLossInCollateral; // LPs paid losses
         }
@@ -220,6 +251,7 @@ contract MinimumPerps is ERC4626 {
             delete positions[trader];
         } else {
             positions[trader] = position;
+            position.lastUpdatedAt = block.timestamp;
         }
 
         if (outputAmount > 0) IERC20(asset()).safeTransfer(trader, outputAmount);
@@ -248,6 +280,16 @@ contract MinimumPerps is ERC4626 {
         totalDeposits -= assets;
         super._withdraw(caller, receiver, owner, assets, shares);
         _validateMaxUtilization();
+    }
+
+    function getPendingBorrowingFees(address trader, bool isLong) external view returns (uint256) {
+        Position memory position = isLong ? longPositions[trader] : shortPositions[trader];
+        return _calculateBorrowingFees(position);
+    }
+
+    function _calculateBorrowingFees(Position memory position) internal view returns (uint256 pendingBorrowingFees) {
+        uint256 pendingBorrowingFeesUsd = position.sizeInUsd * (block.timestamp - position.lastUpdatedAt) * borrowingPerSharePerSecond / 1e30;
+        pendingBorrowingFees = pendingBorrowingFeesUsd / getCollateralPrice();
     }
 
     function getIndexPrice() public view returns (uint256) {

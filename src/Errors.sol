@@ -8,7 +8,9 @@ library Errors {
     error PriceFeedNotUpdated(address priceFeed, uint256 lastTimestamp, uint256 heartbeat);
     error EmptyPosition(uint256 sizeInUsd, uint256 sizeInTokens, uint256 collateralAmount);
     error MaxUtilizationBreached(uint256 maxUtilizableDeposits, uint256 totalReserved);
-    error InsufficientCollateral(uint256 positionLoss, uint256 collateralAmount);
+    error InsufficientCollateralForLoss(uint256 positionLoss, uint256 collateralAmount);
     error PositionIsLiquidatable();
     error PositionNotLiquidatable();
+    error InvalidBorrowingFeeRate(uint256 _borrowingPerSharePerSecond);
+    error InsufficientCollateralForBorrowingFees(uint256 borrowingFees, uint256 collateralAmount);
 }
