@@ -40,6 +40,7 @@ contract MockAggregatorV3 is IAggregatorV3 {
 
     function setPrice(int256 _answer) external {
         answer = _answer;
+        updatedAt = block.timestamp;
     }
 
     function latestRoundData() external view override returns (uint80, int256, uint256, uint256, uint80) {

@@ -134,7 +134,10 @@ contract MinimumPerps is ERC4626, Ownable2Step {
         position.collateralAmount += collateralDelta;
         position.sizeInUsd += sizeDeltaUsd;
         position.sizeInTokens += indexTokenDelta;
+
         position.collateralAmount -= pendingBorrowingFees;
+        totalDeposits += pendingBorrowingFees;
+
         position.lastUpdatedAt = block.timestamp;
 
         _validateNonEmptyPosition(position);
@@ -250,8 +253,8 @@ contract MinimumPerps is ERC4626, Ownable2Step {
             outputAmount += position.collateralAmount;
             delete positions[trader];
         } else {
-            positions[trader] = position;
             position.lastUpdatedAt = block.timestamp;
+            positions[trader] = position;
         }
 
         if (outputAmount > 0) IERC20(asset()).safeTransfer(trader, outputAmount);

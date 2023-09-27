@@ -662,5 +662,166 @@ contract MinimumPerpsTest is Test {
         assertEq(bobPosition.collateralAmount, 0);
     }
 
+    function test_borrowingFees() public {
+        // Activate borrowing fees
+        minimumPerps.setBorrowingPerSharePerSecond(3170979198376458650431); // Set the max of 10% per year
+
+        USDC.mint(alice, 300e6); // 300 USDC for Alice to deposit
+
+        vm.startPrank(alice);
+        USDC.approve(address(minimumPerps), 300e6);
+        minimumPerps.deposit(300e6, alice);
+
+        uint256 vaultBalance = USDC.balanceOf(address(minimumPerps));
+        assertEq(vaultBalance, 300e6);
+
+        uint256 netBalance = minimumPerps.totalAssets();
+        assertEq(netBalance, 300e6);
+
+        vm.stopPrank();
+
+        USDC.mint(bob, 50e6); // 50 USDC for Bob to use as collateral
+
+        vm.startPrank(bob);
+
+        // Bob opens a 2x Long with 50 USDC as collateral
+        USDC.approve(address(minimumPerps), 50e6);
+        minimumPerps.increasePosition(true, 100 * 1e30, 50e6);
+
+        vm.stopPrank();
+
+        // Bob has a position with the following:
+        //  - Size in dollars of 100e30
+        //  - Size in tokens of .002 WBTC (2e5)
+        //  - Collateral of 50e6 USDC
+        MinimumPerps.Position memory bobPosition = minimumPerps.getPosition(true, bob);
+        assertEq(bobPosition.sizeInUsd, 100e30);
+
+        assertEq(bobPosition.sizeInTokens, 2e5);
+        assertEq(bobPosition.collateralAmount, 50e6);
+
+        // The market holds 350 USDC in total
+        vaultBalance = USDC.balanceOf(address(minimumPerps));
+        assertEq(vaultBalance, 350e6);
+
+        // 50 USDC of collateral
+        assertEq(minimumPerps.totalCollateral(), 50*1e6);
+
+        // 100 USDC of deposits
+        assertEq(minimumPerps.totalDeposits(), 300*1e6);
+
+        // Collateral is not included in the balance of the market that belongs to depositors
+        netBalance = minimumPerps.totalAssets();
+        assertEq(netBalance, 300e6);
+
+        // Alice has 0 pending borrowing fees as no time has passed
+        uint256 pendingBorrowing = minimumPerps.getPendingBorrowingFees(bob, true);
+
+        assertEq(pendingBorrowing, 0);
+
+        // 1 year passes, 10% of bob's position is owed to borrowing fees
+        vm.warp(block.timestamp + 365 days);
+
+        // Prices must be updated
+        btcFeed.setPrice(int256(50_000 * 10**feedDecimals));
+        usdcFeed.setPrice(int256(1 * 10**feedDecimals));
+
+        pendingBorrowing = minimumPerps.getPendingBorrowingFees(bob, true);
+
+        // 10% of Bob's position size is $10 -> 10 USDC are pending in borrowing fees (minor precision error)
+        assertEq(pendingBorrowing, 10e6-1);
+
+        // Bob now increases his position and settles his pending borrowing fees
+        vm.prank(bob);
+        minimumPerps.increasePosition(true, 10e30, 0);
+
+        bobPosition = minimumPerps.getPosition(true, bob);
+
+        // Bob's pending borrowing fees have been deducted from his collateral
+        assertEq(bobPosition.sizeInUsd, 110e30);
+
+        assertEq(bobPosition.sizeInTokens, 22e4);
+        assertEq(bobPosition.collateralAmount, 40e6+1);
+
+        // Another year passes and 10% of bob's existing position size accrues in pending borrowing fees
+        vm.warp(block.timestamp + 365 days);
+
+        // Prices must be updated
+        btcFeed.setPrice(int256(50_000 * 10**feedDecimals));
+        usdcFeed.setPrice(int256(1 * 10**feedDecimals));
+
+
+        pendingBorrowing = minimumPerps.getPendingBorrowingFees(bob, true);
+
+        // 10% of Bob's position size is $11 -> 11 USDC are pending in borrowing fees (minor precision error)
+        assertEq(pendingBorrowing, 11e6-1);
+
+        // Bob decreases his position by half and has to pay borrowing fees
+        vm.prank(bob);
+        minimumPerps.decreasePosition(true, 55e30, 0);
+
+        bobPosition = minimumPerps.getPosition(true, bob);
+
+        // Bob's pending borrowing fees have been deducted from his collateral
+        assertEq(bobPosition.sizeInUsd, 55e30);
+        assertEq(bobPosition.sizeInTokens, 11e4);
+        // 10% of bob's position size has accrued: 40e6 + 1 - (11e6-1) (imprecision)
+        assertEq(bobPosition.collateralAmount, 40e6 + 1 - (11e6-1));
+
+        // 2 weeks pass
+        vm.warp(block.timestamp + 2 weeks);
+
+        // Prices must be updated
+        btcFeed.setPrice(int256(50_000 * 10**feedDecimals));
+        usdcFeed.setPrice(int256(1 * 10**feedDecimals));
+
+        pendingBorrowing = minimumPerps.getPendingBorrowingFees(bob, true);
+
+        // Bob's size is 55 * 1e30 
+        // The borrowing rate is 3170979198376458650431
+        // 1209600 seconds have passed since the position was updated
+        // pendingBorrowingUsd = 55 * 1e30 * 1209600 * 3170979198376458650431 / 1e30 = 210958904109589041095873568000
+        // => pendingBorrowingUsd ~= $0.210958
+        // => pendingBorrowing = 210958 USDC (~.21 USDC)
+        assertEq(pendingBorrowing, 210958);
+
+        uint256 bobUsdcBalBefore = IERC20(USDC).balanceOf(bob);
+
+        // Bob closes his remaining position
+        vm.prank(bob);
+        minimumPerps.decreasePosition(true, 55e30, 0);
+
+        uint256 bobUsdcBalAfter = IERC20(USDC).balanceOf(bob);
+
+        // Bob receives back his existing collateral minus borrowing fees
+        // existing collateral: 40e6 + 1 - (11e6-1) USDC
+        // borrowing fees: 210958 USDC
+        // => Bob receives back 40e6 + 1 - (11e6-1) - 210958
+        assertEq(bobUsdcBalAfter - bobUsdcBalBefore, 40e6 + 1 - (11e6-1) - 210958);
+        
+        // Bob's position is gone
+        bobPosition = minimumPerps.getPosition(true, bob);
+
+        assertEq(bobPosition.sizeInUsd, 0);
+        assertEq(bobPosition.sizeInTokens, 0);
+        assertEq(bobPosition.collateralAmount, 0);
+        assertEq(bobPosition.lastUpdatedAt, 0);
+
+        // LPs collected all of the borrowing fees bob paid
+        // Net borrowing fees bob paid: 10e6-1 + 11e6-1 + 210958
+        uint256 liquidityPoolWithBorrowingFees = 300e6 + 10e6-1 + 11e6-1 + 210958;
+        assertEq(minimumPerps.totalDeposits(), liquidityPoolWithBorrowingFees);
+
+        uint256 aliceUsdcBalBefore = IERC20(USDC).balanceOf(alice);
+
+        vm.prank(alice);
+        minimumPerps.redeem(300e6, alice, alice);
+
+        uint256 aliceUsdcBalAfter = IERC20(USDC).balanceOf(alice);
+
+        // 1 wei of imprecision
+        assertEq(aliceUsdcBalAfter - aliceUsdcBalBefore, liquidityPoolWithBorrowingFees - 1);
+    }
+
 
 }
