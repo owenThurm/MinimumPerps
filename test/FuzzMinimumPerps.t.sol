@@ -94,10 +94,38 @@ contract MinimumPerpsTest is StdInvariant, Test {
 
         minimumPerpsHandler = new MinimumPerpsHandler(
             minimumPerps,
-            USDC
+            USDC,
+            btcFeed
         );
-        targetContract(address(minimumPerps));
         targetContract(address(minimumPerpsHandler));
+
+        targetSender(bob);
+        vm.prank(bob);
+        minimumPerps.approve(address(minimumPerpsHandler), type(uint256).max);
+
+        targetSender(alice);
+        vm.prank(alice);
+        minimumPerps.approve(address(minimumPerpsHandler), type(uint256).max);
+
+        uint256 usdcLiquidityDeposit = 1_000_000e6;
+
+        deal(address(USDC), bob, usdcLiquidityDeposit);
+        vm.startPrank(bob);
+        USDC.approve(address(minimumPerps), usdcLiquidityDeposit);
+        minimumPerps.deposit(usdcLiquidityDeposit, bob);
+
+        vm.stopPrank();
+
+        deal(address(USDC), alice, usdcLiquidityDeposit);
+        vm.startPrank(alice);
+        USDC.approve(address(minimumPerps), usdcLiquidityDeposit);
+        minimumPerps.deposit(usdcLiquidityDeposit, alice);
+
+        vm.stopPrank();
+    }
+
+    function invariant_hitThis() public {
+        assertTrue(minimumPerps.test() == 0);
     }
 
     function invariant_OINotOverutilized() public {

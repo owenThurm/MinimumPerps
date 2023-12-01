@@ -158,9 +158,9 @@ contract MinimumPerps is ERC4626, Ownable2Step {
         if (isPositionLiquidatable(increaseFor, isLong)) revert Errors.PositionIsLiquidatable();
     }
 
-    function decreasePosition(bool isLong, uint256 sizeDeltaUsd, uint256 collateralDelta) external {
-        _decreasePosition(msg.sender, isLong, sizeDeltaUsd, collateralDelta, false);
-        if (isPositionLiquidatable(msg.sender, isLong)) revert Errors.PositionIsLiquidatable();
+    function decreasePosition(bool isLong, uint256 sizeDeltaUsd, uint256 collateralDelta, address owner) external {
+        _decreasePosition(owner, isLong, sizeDeltaUsd, collateralDelta, false);
+        if (isPositionLiquidatable(owner, isLong)) revert Errors.PositionIsLiquidatable();
     }
 
     function isPositionLiquidatable(address trader, bool isLong) public view returns (bool) {
@@ -197,7 +197,6 @@ contract MinimumPerps is ERC4626, Ownable2Step {
 
     function _decreasePosition(address trader, bool isLong, uint256 sizeDeltaUsd, uint256 collateralDelta, bool isLiquidation) internal {
         mapping(address => Position) storage positions = isLong ? longPositions : shortPositions;
-
         Position memory position = positions[trader];
 
         uint256 collateralTokenPrice = getCollateralPrice();
@@ -286,6 +285,8 @@ contract MinimumPerps is ERC4626, Ownable2Step {
         super._deposit(caller, receiver, assets, shares);
         totalDeposits += assets;
     }
+
+    uint256 public test;
 
     function _withdraw(address caller, address receiver, address owner, uint256 assets, uint256 shares) internal override {
         totalDeposits -= assets;
