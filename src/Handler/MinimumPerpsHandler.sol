@@ -22,7 +22,7 @@ contract MinimumPerpsHandler is Test {
     }
 
     function deposit(uint256 assets, address receiver) external {
-        bound(assets, 0, 1e20);
+        assets = bound(assets, 0, 1e20);
         usdc.mint(address(this), assets);
 
         usdc.approve(address(minimumPerps), assets);
