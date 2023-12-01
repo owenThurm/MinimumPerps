@@ -107,6 +107,7 @@ contract MinimumPerpsTest is StdInvariant, Test {
 
         uint256 collateralPrice = minimumPerps.getCollateralPrice();
 
+        // Open interest should not be more than 50% of the available liquidity
         assert(netOI <= depositedLiquidity * collateralPrice / 2);
     }
 
