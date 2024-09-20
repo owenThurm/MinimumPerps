@@ -12,8 +12,8 @@ import {IOracle, Oracle} from "../src/Oracle.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {MinimumPerpsHandler} from "../src/Handler/MinimumPerpsHandler.sol";
 
-contract MinimumPerpsTest is StdInvariant, Test {
-    MinimumPerps public minimumPerps;
+contract MinimumPerpsFuzzTest is StdInvariant, Test {
+    MinimumPerpsFuzz public minimumPerps;
     MinimumPerpsHandler public minimumPerpsHandler;
 
     error TooMuchDeposits();
@@ -83,7 +83,7 @@ contract MinimumPerpsTest is StdInvariant, Test {
             btcPriceFeedFactor
         );
 
-        minimumPerps = new MinimumPerps(
+        minimumPerps = new MinimumPerpsFuzz(
             name, 
             symbol, 
             address(BTC),

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {MinimumPerps} from "../MinimumPerpsFuzzed.sol";
+import {MinimumPerpsFuzz} from "../MinimumPerpsFuzzed.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/interfaces/IERC20.sol";
 
 import {MockERC20} from "../../test/Mock/MockERC20.sol";
@@ -11,11 +11,11 @@ import "forge-std/Test.sol";
 
 contract MinimumPerpsHandler is Test {
 
-    MinimumPerps public minimumPerps;
+    MinimumPerpsFuzz public minimumPerps;
     MockERC20 public usdc;
     MockAggregatorV3 public pricefeed;
 
-    constructor(MinimumPerps _minimumPerps, MockERC20 _usdc, MockAggregatorV3 _pricefeed) {
+    constructor(MinimumPerpsFuzz _minimumPerps, MockERC20 _usdc, MockAggregatorV3 _pricefeed) {
         minimumPerps = _minimumPerps;
         usdc = _usdc;
         pricefeed = _pricefeed;

@@ -16,7 +16,7 @@ import {Ownable2Step} from "openzeppelin-contracts/contracts/access/Ownable2Step
 
 import "forge-std/Test.sol";
 
-contract MinimumPerps is ERC4626, Ownable2Step {
+contract MinimumPerpsFuzz is ERC4626, Ownable2Step {
     using SignedMath for int256;
     using SafeCast for int256;
     using SafeCast for uint256;
